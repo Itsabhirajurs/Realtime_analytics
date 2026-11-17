@@ -1,0 +1,15 @@
+# Stream processing
+apache-flink==2.2.1
+
+# Kafka
+kafka-python>=2.2,<3
+
+# Database
+psycopg2-binary>=2.9.9,<3
+
+# API and configuration
+requests>=2.31,<3
+python-dotenv>=1.0,<2
+
+# Data handling
+pandas>=2.0,<2.3
