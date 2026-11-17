@@ -1,173 +1,412 @@
-"""Flight Telemetry Kafka Producer with Smart API Quota Caching.
+"""AeroPulse flight ingestion and Kafka publishing service.
 
-Fetches active flights from Aviationstack API or replays from local cache,
-then streams each flight into the Kafka topic 'flight_stream'.
+Default mode: replay the local cache.
+Live API access requires an explicit --live flag.
 """
 
 import argparse
 import json
-import os
-import sys
+import logging
 import time
+
+from datetime import datetime, timezone
+from pathlib import Path
+
+import requests
+
+from kafka import KafkaProducer
+
 from config import (
     AVIATIONSTACK_KEY,
     AVIATIONSTACK_URL,
+    API_TIMEOUT_SECONDS,
     CACHE_FILE,
     KAFKA_BROKER,
+    KAFKA_CLIENT_ID,
+    KAFKA_REQUEST_TIMEOUT_MS,
     KAFKA_TOPIC_FLIGHTS,
-    USE_CACHE,
+    MAX_FLIGHT_BATCH_SIZE,
 )
-from kafka import KafkaProducer
-from kafka.errors import NoBrokersAvailable
-import requests
+
+from flight_schema import normalize_flight
 
 
-def fetch_flights_from_api():
-  """Fetches live active flights from Aviationstack API (uses 1 API request)."""
-  print("\n🌐 Fetching live flight data from Aviationstack API (1 credit)...")
-  params = {
-      "access_key": AVIATIONSTACK_KEY,
-      "flight_status": "active",
-      "limit": 100,  # Grab maximum allowed per call
-  }
-  try:
-    response = requests.get(AVIATIONSTACK_URL, params=params, timeout=10)
-    data = response.json()
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
 
-    if "error" in data:
-      print(f"❌ API Error: {data['error'].get('message', data['error'])}")
-      sys.exit(1)
-
-    # Save to local cache for free reuse
-    with open(CACHE_FILE, "w", encoding="utf-8") as f:
-      json.dump(data, f, indent=2)
-    print(f" Saved snapshot of {len(data.get('data', []))} flights to cache!")
-    return data.get("data", [])
-
-  except requests.RequestException as e:
-    print(f"❌ Network error while reaching Aviationstack: {e}")
-    sys.exit(1)
+logger = logging.getLogger("aeropulse.producer")
 
 
-def load_flights_from_cache():
-  """Loads previously cached flight data (0 API credits used)."""
-  if not os.path.exists(CACHE_FILE):
-    print(
-        f"ℹ️ Cache file '{CACHE_FILE}' not found. Fetching initial snapshot..."
+def utc_now() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
     )
-    return fetch_flights_from_api()
-
-  print(
-      f"\n Loading flight data from local cache '{CACHE_FILE}' (0 credits"
-      " used)..."
-  )
-  with open(CACHE_FILE, "r", encoding="utf-8") as f:
-    data = json.load(f)
-  return data.get("data", [])
 
 
-def clean_flight_record(flight):
-  """Normalizes nested Aviationstack JSON into a clean flat dictionary."""
-  flight_info = flight.get("flight") or {}
-  airline_info = flight.get("airline") or {}
-  dep_info = flight.get("departure") or {}
-  arr_info = flight.get("arrival") or {}
-  live_info = flight.get("live") or {}
+def validate_payload(payload: dict) -> list:
+    """Validate the minimum expected Aviationstack response structure."""
 
-  return {
-      "flight_iata": flight_info.get("iata") or "N/A",
-      "flight_number": flight_info.get("number") or "N/A",
-      "airline_name": airline_info.get("name") or "Unknown Airline",
-      "flight_status": flight.get("flight_status") or "active",
-      "dep_airport": dep_info.get("airport") or "Unknown Departure",
-      "dep_iata": dep_info.get("iata") or "---",
-      "arr_airport": arr_info.get("airport") or "Unknown Arrival",
-      "arr_iata": arr_info.get("iata") or "---",
-      "dep_delay": dep_info.get("delay") or 0,
-      "arr_delay": arr_info.get("delay") or 0,
-      "latitude": float(live_info.get("latitude") or 0.0),
-      "longitude": float(live_info.get("longitude") or 0.0),
-      "altitude": float(live_info.get("altitude") or 0.0),
-      "speed_horizontal": float(live_info.get("speed_horizontal") or 0.0),
-      "speed_vertical": float(live_info.get("speed_vertical") or 0.0),
-      "is_ground": bool(live_info.get("is_ground", False)),
-      "timestamp": (
-          live_info.get("updated")
-          or time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
-      ),
-  }
+    if not isinstance(payload, dict):
+        raise ValueError("API/cache response must be a JSON object.")
+
+    if isinstance(payload.get("error"), dict):
+        message = payload["error"].get("message", "Unknown API error")
+        raise RuntimeError(f"Aviationstack API error: {message}")
+
+    records = payload.get("data")
+
+    if not isinstance(records, list):
+        raise ValueError("Expected a list under response key 'data'.")
+
+    return records
 
 
-def stream_to_kafka(flights, delay_between_msgs=0.1):
-  """Connects to Kafka and streams each flight record."""
-  print(f"Connecting to Kafka broker at {KAFKA_BROKER}...")
-  try:
-    producer = KafkaProducer(
-        bootstrap_servers=[KAFKA_BROKER],
-        value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-        request_timeout_ms=10000,
+def save_cache(payload: dict) -> None:
+    """Atomically save an API snapshot without damaging the old cache."""
+
+    cache_path = Path(CACHE_FILE)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    saved_payload = dict(payload)
+
+    saved_payload["_aeropulse_cache"] = {
+        "source": "aviationstack",
+        "fetched_at_utc": utc_now(),
+        "record_count": len(saved_payload.get("data", [])),
+        "cache_version": 1,
+    }
+
+    temporary_path = cache_path.with_name(
+        cache_path.name + ".tmp"
     )
-    print(" Connected to Kafka successfully!")
-  except NoBrokersAvailable:
-    print(
-        f"❌ Cannot connect to Kafka on {KAFKA_BROKER}. Is Kafka running in"
-        " WSL?"
+
+    with temporary_path.open("w", encoding="utf-8") as file:
+        json.dump(
+            saved_payload,
+            file,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    temporary_path.replace(cache_path)
+
+    logger.info("Saved API snapshot to %s", cache_path)
+
+
+def load_cache() -> tuple[list, str | None]:
+    """Load cache without making any API request."""
+
+    cache_path = Path(CACHE_FILE)
+
+    if not cache_path.exists():
+        raise FileNotFoundError(
+            f"Cache not found: {cache_path}. "
+            "No API request was made. "
+            "Use --live explicitly only when you intend to spend an API credit."
+        )
+
+    with cache_path.open("r", encoding="utf-8") as file:
+        payload = json.load(file)
+
+    records = validate_payload(payload)
+
+    cache_metadata = payload.get("_aeropulse_cache") or {}
+    snapshot_time = cache_metadata.get("fetched_at_utc")
+
+    logger.info(
+        "Loaded %d cached records. Source snapshot time: %s",
+        len(records),
+        snapshot_time or "unknown",
     )
-    sys.exit(1)
 
-  print(
-      f"\n🚀 Streaming {len(flights)} flight records into topic"
-      f" '{KAFKA_TOPIC_FLIGHTS}'...\n"
-  )
-  published = 0
-  for f in flights:
-    cleaned = clean_flight_record(f)
-    if cleaned["flight_iata"] == "N/A":
-      continue  # Skip unassigned flights
+    return records, snapshot_time
 
-    producer.send(KAFKA_TOPIC_FLIGHTS, value=cleaned)
-    published += 1
 
-    print(
-        f"  ✈️ [{cleaned['flight_iata']}] {cleaned['airline_name']} |"
-        f" {cleaned['dep_iata']} ➔ {cleaned['arr_iata']} | Alt:"
-        f" {cleaned['altitude']:.0f}m | Spd: {cleaned['speed_horizontal']:.0f}"
-        f" km/h | DepDelay: {cleaned['dep_delay']}m"
+def fetch_live_snapshot(limit: int) -> tuple[list, str]:
+    """Make exactly one explicit API request; no automatic retries."""
+
+    if not AVIATIONSTACK_KEY:
+        raise RuntimeError(
+            "AVIATIONSTACK_KEY is missing from your local .env file."
+        )
+
+    logger.warning(
+        "LIVE API REQUEST: this operation uses one Aviationstack request."
     )
-    time.sleep(delay_between_msgs)
 
-  producer.flush()
-  print(
-      f"\n Completed! Successfully streamed {published} flight records into"
-      f" Kafka topic '{KAFKA_TOPIC_FLIGHTS}'."
-  )
+    params = {
+        "access_key": AVIATIONSTACK_KEY,
+        "flight_status": "active",
+        "limit": limit,
+    }
+
+    response = requests.get(
+        AVIATIONSTACK_URL,
+        params=params,
+        timeout=API_TIMEOUT_SECONDS,
+    )
+
+    response.raise_for_status()
+
+    payload = response.json()
+    records = validate_payload(payload)
+
+    fetched_at = utc_now()
+
+    # Keep the raw API response intact, with separate cache metadata.
+    save_cache(payload)
+
+    logger.info(
+        "Received %d flight records from Aviationstack.",
+        len(records),
+    )
+
+    return records, fetched_at
+
+
+def normalize_batch(
+    raw_records: list,
+    data_mode: str,
+    snapshot_time: str | None,
+) -> tuple[list, int]:
+    """Normalize records and count rejected entries."""
+
+    normalized = []
+    rejected = 0
+
+    for index, raw in enumerate(raw_records):
+        try:
+            event = normalize_flight(
+                raw=raw,
+                data_mode=data_mode,
+                snapshot_fetched_at=snapshot_time,
+            )
+
+            normalized.append(event)
+
+        except (TypeError, ValueError) as exc:
+            rejected += 1
+            logger.warning(
+                "Rejected source record %d: %s",
+                index,
+                exc,
+            )
+
+    return normalized, rejected
+
+
+def kafka_producer() -> KafkaProducer:
+    """Create a reliable Kafka producer."""
+
+    brokers = [
+        address.strip()
+        for address in KAFKA_BROKER.split(",")
+        if address.strip()
+    ]
+
+    if not brokers:
+        raise ValueError("No Kafka bootstrap server configured.")
+
+    return KafkaProducer(
+        bootstrap_servers=brokers,
+        client_id=KAFKA_CLIENT_ID,
+        acks="all",
+        retries=5,
+        max_in_flight_requests_per_connection=1,
+        request_timeout_ms=KAFKA_REQUEST_TIMEOUT_MS,
+        delivery_timeout_ms=120000,
+        compression_type="gzip",
+        key_serializer=lambda key: key.encode("utf-8"),
+        value_serializer=lambda value: json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+    )
+
+
+def publish_to_kafka(
+    records: list,
+    delay_seconds: float = 0.0,
+) -> int:
+    """Publish records and wait for broker acknowledgements."""
+
+    if not records:
+        logger.warning("No valid records to publish.")
+        return 0
+
+    logger.info(
+        "Connecting to Kafka: %s | Topic: %s",
+        KAFKA_BROKER,
+        KAFKA_TOPIC_FLIGHTS,
+    )
+
+    producer = kafka_producer()
+    acknowledged = 0
+
+    try:
+        for index, event in enumerate(records, start=1):
+            future = producer.send(
+                KAFKA_TOPIC_FLIGHTS,
+                key=event["flight_key"],
+                value=event,
+            )
+
+            metadata = future.get(
+                timeout=(KAFKA_REQUEST_TIMEOUT_MS / 1000) + 10
+            )
+
+            acknowledged += 1
+
+            logger.info(
+                "[%d/%d] %s | %s -> %s | "
+                "position=%s | partition=%d offset=%d",
+                index,
+                len(records),
+                event.get("flight_iata")
+                or event.get("flight_key"),
+                event.get("dep_iata") or "UNKNOWN",
+                event.get("arr_iata") or "UNKNOWN",
+                event.get("has_position"),
+                metadata.partition,
+                metadata.offset,
+            )
+
+            if delay_seconds > 0:
+                time.sleep(delay_seconds)
+
+        producer.flush(timeout=30)
+
+    finally:
+        producer.close(timeout=30)
+
+    logger.info(
+        "Publishing finished: %d/%d records acknowledged.",
+        acknowledged,
+        len(records),
+    )
+
+    return acknowledged
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="AeroPulse flight telemetry ingestion service"
+    )
+
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Fetch one fresh Aviationstack snapshot (uses one API request).",
+    )
+
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Normalize cached records without publishing to Kafka.",
+    )
+
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=MAX_FLIGHT_BATCH_SIZE,
+        help="Maximum number of records requested from Aviationstack.",
+    )
+
+    parser.add_argument(
+        "--max-records",
+        type=int,
+        default=None,
+        help="Optional limit on the number of records published.",
+    )
+
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.0,
+        help="Delay between Kafka messages in seconds.",
+    )
+
+    args = parser.parse_args()
+
+    if args.live and args.dry_run:
+        parser.error(
+            "--live cannot be combined with --dry-run. "
+            "A live request should not be used for a dry run."
+        )
+
+    if not 1 <= args.limit <= 100:
+        parser.error("--limit must be between 1 and 100.")
+
+    if args.max_records is not None and args.max_records < 1:
+        parser.error("--max-records must be at least 1.")
+
+    if args.delay < 0:
+        parser.error("--delay cannot be negative.")
+
+    # Source selection is explicit and safe.
+    if args.live:
+        raw_records, snapshot_time = fetch_live_snapshot(args.limit)
+        data_mode = "api_snapshot"
+    else:
+        raw_records, snapshot_time = load_cache()
+        data_mode = "cache_replay"
+
+    records, rejected = normalize_batch(
+        raw_records,
+        data_mode,
+        snapshot_time,
+    )
+
+    if args.max_records:
+        records = records[:args.max_records]
+
+    positions = sum(
+        1 for event in records if event["has_position"]
+    )
+
+    logger.info("=" * 65)
+    logger.info("AEROPULSE INGESTION SUMMARY")
+    logger.info("Data mode: %s", data_mode)
+    logger.info("Source records: %d", len(raw_records))
+    logger.info("Valid records: %d", len(records))
+    logger.info("Rejected records: %d", rejected)
+    logger.info("Records with coordinates: %d", positions)
+    logger.info("Records without coordinates: %d", len(records) - positions)
+    logger.info("=" * 65)
+
+    if args.dry_run:
+        logger.info("DRY RUN: Kafka was not contacted.")
+
+        for event in records[:5]:
+            logger.info(
+                "Preview: %s | %s -> %s | "
+                "mode=%s | position=%s",
+                event.get("flight_iata") or event["flight_key"],
+                event.get("dep_iata"),
+                event.get("arr_iata"),
+                event["data_mode"],
+                event["has_position"],
+            )
+
+        return
+
+    publish_to_kafka(
+        records,
+        delay_seconds=args.delay,
+    )
 
 
 if __name__ == "__main__":
-  parser = argparse.ArgumentParser(
-      description="Flight Telemetry Kafka Producer"
-  )
-  parser.add_argument(
-      "--live",
-      action="store_true",
-      help="Force live fetch from Aviationstack API (uses 1 credit)",
-  )
-  parser.add_argument(
-      "--delay",
-      type=float,
-      default=0.05,
-      help="Delay in seconds between Kafka messages (default: 0.05s)",
-  )
-  args = parser.parse_args()
-
-  # Choose live API or cached data
-  if args.live or not USE_CACHE:
-    flight_data = fetch_flights_from_api()
-  else:
-    flight_data = load_flights_from_cache()
-
-  if not flight_data:
-    print("⚠️ No flight records available to stream.")
-    sys.exit(0)
-
-  stream_to_kafka(flight_data, delay_between_msgs=args.delay)
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.warning("Producer stopped by user.")
+    except Exception as exc:
+        logger.exception("Flight ingestion failed: %s", exc)
+        raise
