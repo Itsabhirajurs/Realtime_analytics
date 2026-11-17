@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Weather Analytics & Agronomic Streaming Platform</title>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #090d16;
+      --card-bg: rgba(22, 29, 49, 0.85);
+      --border: rgba(255, 255, 255, 0.12);
+      --accent: #38bdf8;
+      --green: #22c55e;
+      --red: #ef4444;
+      --amber: #f59e0b;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Outfit', sans-serif; }
+    body { background: radial-gradient(circle at top, #131b2e, #090d16); color: var(--text); min-height: 100vh; padding: 24px; }
+    .container { max-width: 1250px; margin: 0 auto; }
+
+    header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; margin-bottom: 24px; }
+    .logo-box h1 { font-size: 26px; font-weight: 700; background: linear-gradient(90deg, #38bdf8, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .logo-box p { font-size: 13px; color: var(--text-muted); }
+
+    .nav-controls { display: flex; align-items: center; gap: 12px; }
+    .search-box { display: flex; background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 6px 12px; }
+    .search-box input { background: transparent; border: none; outline: none; color: white; font-size: 14px; width: 150px; }
+    .search-box button { background: var(--accent); border: none; color: black; font-weight: 600; padding: 6px 14px; border-radius: 8px; cursor: pointer; }
+
+    .unit-switch { display: flex; background: #1e293b; border-radius: 10px; padding: 3px; border: 1px solid var(--border); }
+    .unit-btn { background: transparent; border: none; color: var(--text-muted); padding: 6px 14px; font-weight: 600; border-radius: 8px; cursor: pointer; transition: 0.2s; }
+    .unit-btn.active { background: var(--accent); color: #090d16; }
+
+    .city-pills { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 8px; margin-bottom: 20px; }
+    .pill { background: rgba(255, 255, 255, 0.05); border: 1px solid var(--border); color: var(--text-muted); padding: 6px 14px; border-radius: 20px; cursor: pointer; font-size: 13px; transition: 0.2s; white-space: nowrap; }
+    .pill:hover, .pill.active { background: rgba(56, 189, 248, 0.2); border-color: var(--accent); color: var(--text); }
+
+    .dashboard-tabs { display: flex; gap: 12px; margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 12px; }
+    .tab-btn { background: transparent; border: none; color: var(--text-muted); font-size: 16px; font-weight: 600; padding: 10px 20px; border-radius: 10px; cursor: pointer; transition: 0.2s; }
+    .tab-btn.active { background: rgba(255, 255, 255, 0.1); color: var(--text); border-bottom: 2px solid var(--accent); }
+
+    .alert-banner { display: none; padding: 18px 22px; border-radius: 14px; margin-bottom: 24px; animation: pulse 2s infinite; }
+    .alert-danger { background: rgba(239, 68, 68, 0.2); border: 1px solid var(--red); color: #fca5a5; }
+    .alert-success { background: rgba(34, 197, 94, 0.15); border: 1px solid var(--green); color: #86efac; }
+    @keyframes pulse { 0% { opacity: 0.95; } 50% { opacity: 0.8; } 100% { opacity: 0.95; } }
+
+    .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 18px; padding: 24px; backdrop-filter: blur(10px); }
+    .grid-hero { display: grid; grid-template-columns: 1.2fr 2fr; gap: 20px; margin-bottom: 24px; }
+    @media(max-width: 850px) { .grid-hero { grid-template-columns: 1fr; } }
+
+    .temp-large { font-size: 64px; font-weight: 700; line-height: 1; margin: 12px 0; }
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 14px; }
+    .stat-box { background: rgba(0,0,0,0.25); border: 1px solid var(--border); border-radius: 14px; padding: 14px; }
+    .stat-label { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+    .stat-value { font-size: 18px; font-weight: 600; }
+
+    .forecast-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-top: 16px; }
+    .fc-card { background: rgba(0,0,0,0.25); border: 1px solid var(--border); border-radius: 14px; padding: 16px; text-align: center; }
+    .fc-day { font-size: 15px; font-weight: 600; }
+    .fc-date { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; }
+    .fc-temp { font-size: 18px; font-weight: 700; margin: 6px 0; }
+    .spray-badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 12px; margin-top: 8px; }
+    .spray-favorable { background: rgba(34, 197, 94, 0.2); color: var(--green); }
+    .spray-unfavorable { background: rgba(239, 68, 68, 0.2); color: var(--red); }
+    .spray-caution { background: rgba(245, 158, 11, 0.2); color: var(--amber); }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="logo-box">
+        <h1>🌦️ AgriWeather Real-Time Streaming</h1>
+        <p>Apache Kafka Streaming Engine • Dual Consumer Architecture</p>
+      </div>
+      <div class="nav-controls">
+        <div class="search-box">
+          <input type="text" id="cityInput" placeholder="Enter City (e.g. Goa, Dubai)..." list="presetList">
+          <datalist id="presetList">
+            {% for city in preset_cities %}
+              <option value="{{ city }}">
+            {% endfor %}
+          </datalist>
+          <button onclick="handleSearch()">Search</button>
+        </div>
+        <div class="unit-switch">
+          <button class="unit-btn active" id="btnC" onclick="setUnit('C')">°C</button>
+          <button class="unit-btn" id="btnF" onclick="setUnit('F')">°F</button>
+        </div>
+      </div>
+    </header>
+
+    <div class="city-pills">
+      {% for city in preset_cities %}
+        <div class="pill {% if city == default_city %}active{% endif %}" onclick="selectCity('{{ city }}')">{{ city }}</div>
+      {% endfor %}
+    </div>
+
+    <div class="dashboard-tabs">
+      <button class="tab-btn active" id="tabPublicBtn" onclick="switchDashboard('public')">
+        👥 General Public Dashboard
+      </button>
+      <button class="tab-btn" id="tabFarmerBtn" onclick="switchDashboard('farmer')">
+        🚜 Farmer Agri-Decision Dashboard
+      </button>
+    </div>
+
+    <!-- PUBLIC DASHBOARD -->
+    <div id="publicSection">
+      <div id="heatAlertBanner" class="alert-banner">
+        <h3 id="heatAlertTitle"></h3>
+        <p id="heatAlertDesc" style="margin-top: 4px; font-size: 14px;"></p>
+      </div>
+
+      <div class="grid-hero">
+        <div class="card" style="display: flex; flex-direction: column; justify-content: space-between;">
+          <div>
+            <span id="pubCityName" style="font-size: 28px; font-weight: 700;">Loading...</span>
+            <span id="pubCountry" style="color: var(--text-muted); font-size: 16px;"></span>
+            <p id="pubDesc" style="color: var(--accent); margin-top: 4px;"></p>
+          </div>
+          <div style="display: flex; align-items: center; justify-content: space-between;">
+            <div class="temp-large" id="pubTemp">--</div>
+            <img id="pubIcon" src="" alt="" style="width: 80px; height: 80px;">
+          </div>
+          <p style="font-size: 13px; color: var(--text-muted);">
+            Feels like: <strong id="pubFeels">--</strong> | Min: <span id="pubMin">--</span> / Max: <span id="pubMax">--</span>
+          </p>
+        </div>
+
+        <div class="card">
+          <h3 style="margin-bottom: 16px; font-size: 18px;">Atmospheric Health & Safety Metrics</h3>
+          <div class="stats-grid">
+            <div class="stat-box">
+              <div class="stat-label">Humidity</div>
+              <div class="stat-value" id="pubHumidity">--</div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label">Wind Speed</div>
+              <div class="stat-value" id="pubWind">--</div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label">Barometer</div>
+              <div class="stat-value" id="pubPressure">--</div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label">Public Heat Alert</div>
+              <div class="stat-value" id="pubRiskStatus" style="font-size: 15px;">--</div>
+            </div>
+          </div>
+          <div style="background: rgba(0,0,0,0.2); border-radius: 12px; padding: 12px; margin-top: 16px;">
+            <p style="font-size: 13px;" id="pubSafetyAdvice">Public Advisory: Safe conditions.</p>
+          </div>
+          <p style="font-size: 12px; color: var(--text-muted); margin-top: 12px;">
+            Consumer 1 • Stream: <code>weather_live</code> • Threshold: <strong>&gt; 32.0°C (89.6°F)</strong>
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- FARMER DASHBOARD -->
+    <div id="farmerSection" class="hidden">
+      <div id="humidityAlertBanner" class="alert-banner">
+        <h3 id="humAlertTitle"></h3>
+        <p id="humAlertDesc" style="margin-top: 4px; font-size: 14px;"></p>
+      </div>
+
+      <div class="stats-grid" style="margin-bottom: 20px;">
+        <div class="card stat-box" style="padding: 20px;">
+          <div class="stat-label">Relative Humidity</div>
+          <div class="stat-value" id="farmerHumValue" style="font-size: 28px;">--</div>
+          <p id="farmerHumTag" style="font-size: 12px; margin-top: 4px;"></p>
+        </div>
+        <div class="card stat-box" style="padding: 20px;">
+          <div class="stat-label">Chemical Spray Window</div>
+          <div class="stat-value" id="farmerSprayStatus" style="font-size: 18px;">--</div>
+          <p id="farmerSprayDesc" style="font-size: 12px; color: var(--text-muted); margin-top: 4px;"></p>
+        </div>
+        <div class="card stat-box" style="padding: 20px;">
+          <div class="stat-label">Fungal Disease / Blight Risk</div>
+          <div class="stat-value" id="farmerDiseaseRisk" style="font-size: 18px;">--</div>
+          <p style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">Triggered if Humidity &gt; 80%</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+          <div>
+            <h3>🌾 1-Week Agronomic Forecast & Field Schedule</h3>
+            <p style="font-size: 13px; color: var(--text-muted);" id="farmerCitySubtitle">Displaying multi-day crop conditions</p>
+          </div>
+          <span style="font-size: 12px; color: var(--text-muted);">Consumer 2 • Stream: <code>weather_forecast</code></span>
+        </div>
+        <div class="forecast-grid" id="forecastCardsContainer"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentUnit = 'C';
+    let currentCity = "{{ default_city }}";
+    let cachedData = null;
+
+    function setUnit(unit) {
+      currentUnit = unit;
+      document.getElementById('btnC').classList.toggle('active', unit === 'C');
+      document.getElementById('btnF').classList.toggle('active', unit === 'F');
+      if (cachedData) renderData(cachedData);
+    }
+
+    function switchDashboard(tab) {
+      document.getElementById('tabPublicBtn').classList.toggle('active', tab === 'public');
+      document.getElementById('tabFarmerBtn').classList.toggle('active', tab === 'farmer');
+      document.getElementById('publicSection').classList.toggle('hidden', tab !== 'public');
+      document.getElementById('farmerSection').classList.toggle('hidden', tab !== 'farmer');
+    }
+
+    function selectCity(city) {
+      currentCity = city;
+      document.querySelectorAll('.pill').forEach(el => {
+        el.classList.toggle('active', el.textContent.trim().toLowerCase() === city.toLowerCase());
+      });
+      fetchWeather(city);
+    }
+
+    function handleSearch() {
+      const input = document.getElementById('cityInput').value.trim();
+      if (input) selectCity(input);
+    }
+
+    async function fetchWeather(city) {
+      try {
+        const res = await fetch(`/api/weather?city=${encodeURIComponent(city)}`);
+        const data = await res.json();
+        cachedData = data;
+        renderData(data);
+      } catch (err) {
+        console.error("Failed to load weather:", err);
+      }
+    }
+
+    function renderData(data) {
+      const pub = data.public;
+      const farmer = data.farmer;
+
+      if (pub) {
+        document.getElementById('pubCityName').textContent = pub.city;
+        document.getElementById('pubCountry').textContent = pub.country ? `(${pub.country})` : '';
+        document.getElementById('pubDesc').textContent = pub.weather_desc;
+        
+        const temp = currentUnit === 'C' ? `${pub.temp_c}°C` : `${pub.temp_f}°F`;
+        const feels = currentUnit === 'C' ? `${pub.feels_like_c}°C` : `${pub.feels_like_f}°F`;
+        const minT = currentUnit === 'C' ? `${pub.temp_min_c}°C` : `${(pub.temp_min_c * 9/5 + 32).toFixed(1)}°F`;
+        const maxT = currentUnit === 'C' ? `${pub.temp_max_c}°C` : `${(pub.temp_max_c * 9/5 + 32).toFixed(1)}°F`;
+        const wind = currentUnit === 'C' ? `${pub.wind_speed_kmh} km/h` : `${pub.wind_speed_mph} mph`;
+
+        document.getElementById('pubTemp').textContent = temp;
+        document.getElementById('pubFeels').textContent = feels;
+        document.getElementById('pubMin').textContent = minT;
+        document.getElementById('pubMax').textContent = maxT;
+        document.getElementById('pubHumidity').textContent = `${pub.humidity}%`;
+        document.getElementById('pubWind').textContent = wind;
+        document.getElementById('pubPressure').textContent = `${pub.pressure_hpa} hPa`;
+        document.getElementById('pubIcon').src = `https://openweathermap.org/img/wn/${pub.weather_icon}@2x.png`;
+        document.getElementById('pubSafetyAdvice').textContent = pub.alert_message;
+
+        const heatBanner = document.getElementById('heatAlertBanner');
+        if (pub.heat_warning) {
+          heatBanner.className = 'alert-banner alert-danger';
+          heatBanner.style.display = 'block';
+          document.getElementById('heatAlertTitle').textContent = pub.alert_title;
+          document.getElementById('heatAlertDesc').textContent = pub.alert_message;
+          document.getElementById('pubRiskStatus').innerHTML = '<span style="color:var(--red);">⚠️ EXTREME HEAT</span>';
+        } else {
+          heatBanner.className = 'alert-banner alert-success';
+          heatBanner.style.display = 'block';
+          document.getElementById('heatAlertTitle').textContent = "Comfortable Conditions";
+          document.getElementById('heatAlertDesc').textContent = `Temperature is safe (under 32°C / 89.6°F threshold).`;
+          document.getElementById('pubRiskStatus').innerHTML = '<span style="color:var(--green);">Normal (Safe)</span>';
+        }
+      }
+
+      if (farmer) {
+        document.getElementById('farmerHumValue').textContent = `${farmer.current_humidity}%`;
+        document.getElementById('farmerCitySubtitle').textContent = `Agronomic conditions for ${farmer.city}`;
+
+        const humBanner = document.getElementById('humidityAlertBanner');
+        if (farmer.high_humidity_alert) {
+          humBanner.className = 'alert-banner alert-danger';
+          humBanner.style.display = 'block';
+          document.getElementById('humAlertTitle').textContent = farmer.humidity_alert_title;
+          document.getElementById('humAlertDesc').textContent = farmer.humidity_alert_msg;
+          document.getElementById('farmerDiseaseRisk').innerHTML = '<span style="color:var(--red);">HIGH RISK</span>';
+          document.getElementById('farmerHumTag').innerHTML = '<span style="color:var(--red);">Exceeds 80% Fungal Limit</span>';
+        } else {
+          humBanner.className = 'alert-banner alert-success';
+          humBanner.style.display = 'block';
+          document.getElementById('humAlertTitle').textContent = farmer.humidity_alert_title;
+          document.getElementById('humAlertDesc').textContent = farmer.humidity_alert_msg;
+          document.getElementById('farmerDiseaseRisk').innerHTML = '<span style="color:var(--green);">LOW RISK</span>';
+          document.getElementById('farmerHumTag').innerHTML = '<span style="color:var(--green);">Safe Moisture Window</span>';
+        }
+
+        const container = document.getElementById('forecastCardsContainer');
+        container.innerHTML = '';
+        if (farmer.forecast_days) {
+          farmer.forecast_days.forEach((day, index) => {
+            const minT = currentUnit === 'C' ? `${day.min_temp_c}°C` : `${day.min_temp_f}°F`;
+            const maxT = currentUnit === 'C' ? `${day.max_temp_c}°C` : `${day.max_temp_f}°F`;
+            
+            let sprayClass = 'spray-favorable';
+            if (day.spray_status === 'UNFAVORABLE') sprayClass = 'spray-unfavorable';
+            if (day.spray_status === 'CAUTION') sprayClass = 'spray-caution';
+
+            if (index === 0) {
+              document.getElementById('farmerSprayStatus').textContent = day.spray_status;
+              document.getElementById('farmerSprayDesc').textContent = day.spray_advisory;
+            }
+
+            container.innerHTML += `
+              <div class="fc-card">
+                <div class="fc-day">${day.day_name}</div>
+                <div class="fc-date">${day.display_date}</div>
+                <img src="https://openweathermap.org/img/wn/${day.icon}.png" alt="" style="width:40px;">
+                <div class="fc-temp">${maxT} <span style="font-size:12px; color:var(--text-muted); font-weight:normal;">/ ${minT}</span></div>
+                <div style="font-size:12px; color:var(--text-muted);">💧 Rain: ${day.rain_probability_pct}%</div>
+                <div style="font-size:12px; color:var(--text-muted);">💨 Hum: ${day.avg_humidity}%</div>
+                <span class="spray-badge ${sprayClass}">${day.spray_status}</span>
+              </div>
+            `;
+          });
+        }
+      }
+    }
+
+    fetchWeather(currentCity);
+    setInterval(() => fetchWeather(currentCity), 8000);
+  </script>
+</body>
+</html>
